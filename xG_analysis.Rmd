@@ -1,0 +1,420 @@
+---
+title: "xG EDA"
+author: "Federico Chung / Alejandro Olaya"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Libraries
+
+```{r, warning=F, message = F}
+if(!require("tidyverse")){install.packages("tidyverse")}
+if(!require("knitr")){install.packages("knitr")}
+if(!require("ggcorrplot")){install.packages("ggcorrplot")}
+if(!require("ggsoccer")){install.packages("ggsoccer")}
+if(!require("glmnet")){install.packages("glmnet")}
+
+library(tidyverse)
+library(knitr)
+library(ggcorrplot)
+library(ggsoccer)
+library(glmnet)
+```
+
+## Exploratory Data Analysis
+
+```{r}
+
+# We read the data 
+
+load("train.RData")
+load("validationtrain.RData")
+load("test.RData")
+
+
+# We merge them together and separate them while doing the pertinent 
+# analsysis
+
+xg_data <- rbind(test, train, validation)
+
+
+goals <- sum(xg_data$is_goal)
+shots <- nrow(xg_data)
+
+
+
+prop <- round(goals*100/shots, 2)
+```
+
+First of all, we have to recognize that we have `r goals` total goals out of a sample of `r shots` shots. This means that `r prop` % of our sample is a goal. Our training, test and validation sets all have a very similar proportion of goals. 
+
+When we analyze the complete data set by league, we find that 
+
+```{r}
+
+xg_data %>% 
+  group_by(league) %>% 
+  summarize(Goals = sum(is_goal),
+            n = n()) %>% 
+  mutate(Percentage = Goals*100/n) %>% 
+  arrange(desc(Goals)) %>% 
+  kable()
+
+
+```
+As we can see, the English Premier League had the most goals on open plays out of the 5 main leagues. However, only the Italian Serie A seems to have had a slightly lower conversion rate on shots on open plays. 
+
+
+```{r}
+
+cor_data <- xg_data %>% 
+  select(is_goal, matchPeriod,  is_CA, eventSec2, x_meter, y_meter, distance_to_goal_line, 
+         angle_to_goal, passes_is_key_Pass, passes_is_through, passes_is_accurate, passes_is_CA, passes_foot, skilled_foot2) %>% 
+  mutate(
+      is_goal = factor(is_goal),
+      matchPeriod = factor(matchPeriod),
+      is_CA = factor(is_CA),
+      eventSec2 = as.numeric(eventSec2),
+      x_meter = as.numeric(x_meter), 
+      y_meter = as.numeric(y_meter),
+      distance_to_goal_line = as.numeric(distance_to_goal_line),
+      angle_to_goal = as.numeric(angle_to_goal),
+      passes_is_key_Pass = factor(passes_is_key_Pass), 
+      passes_is_through = factor(passes_is_through),
+      passes_is_accurate = factor(passes_is_accurate),
+      passes_is_CA = factor(passes_is_CA),
+      passes_foot = factor(passes_foot),
+      skilled_foot2 = factor(skilled_foot2)) 
+
+
+```
+```{r}
+
+d1 <- xg_data %>% 
+  group_by(matchPeriod) %>% 
+  summarise(Goals = sum(is_goal),
+            n = n()) %>% 
+  mutate(Percentage = round(Goals*100/n, 4))
+
+d2 <- xg_data %>% 
+  group_by(is_CA) %>% 
+  summarise(Goals = sum(is_goal),
+            n = n()) %>% 
+  mutate(Percentage = round(Goals*100/n, 4))
+
+d3 <- xg_data %>% 
+  group_by(skilled_foot2) %>% 
+  summarise(Goals = sum(is_goal),
+            n = n()) %>% 
+  mutate(Percentage = round(Goals*100/n, 4))
+
+d4 <- xg_data %>% 
+  group_by(previous_pass) %>% 
+  summarize(Goals = sum(is_goal),
+            n = n()) %>% 
+  mutate(Percentage = round(Goals*100/n, 4))
+
+```
+
+In the tables below we can see that the percentage of open shots converted is a little higher for the second period than the first one as well that shots coming from counter-attacks have a higher conversion rate. Finally, it is a little astonishing that shooting with your least skilled foot has a higher conversion rate than shooting with the skilled foot. 
+```{r}
+
+knitr::kable(
+  list(d1, d2)
+)
+
+
+knitr::kable(
+  list(d3,d4)
+)
+```
+
+
+Now, let's see what happens with our continuous variables! 
+
+As we can observe from the following figure, the closer a player shoots to the goal, the more probability he has to scoring a goal. It seems like our model should consider our $(x,y)$ positional variables. 
+
+```{r}
+  xg_data <- xg_data %>% mutate(is_goal = as.factor(is_goal)) %>% 
+  mutate(x2 = x_meter*100/105, 
+         y2 = y_meter*100/68)
+  
+ggplot(xg_data) + 
+    annotate_pitch(colour = "black",
+                       fill   = "white",
+                       limits = FALSE) +
+    geom_point(data = xg_data,
+               aes(x= x2, y = y2, color = is_goal),
+               size = 0.8) +
+   scale_color_manual(values = c("1" = "forestgreen", "0" = "gray"),
+                      name = "",
+                      labels = c("1" = "Goal", "0" = "No Goal")) +
+        theme_pitch() +
+        theme(plot.background = element_rect(fill = "white"),
+              title = element_text(colour = "black"))  + 
+        coord_cartesian(xlim = c(50, 105)) + 
+  theme(legend.position = "bottom", legend.direction = "horizontal",
+              plot.title = element_text(hjust = 0.07, face = "plain"),
+              plot.subtitle = element_text(hjust = 0.07, size = 10, face = "italic"),
+              plot.caption = element_text(hjust = 0.95),
+              plot.margin = margin(1, 0.2, 0.5, 0.2, "cm")) + 
+  labs(title = "Total open shots for the 2017-18 season")
+        
+      
+```
+
+```{r}
+ ggplot(data = xg_data, aes(x = distance_to_goal_line, 
+                            y = ..density..)) + 
+  geom_histogram() + 
+  theme_bw() + 
+
+  labs(title = "Histrogram of Distance to Goal for every shot",
+       y = "Proportion",
+       x = "Distance to goal (m)")
+
+
+```
+
+
+
+```{r}
+
+  ggplot(data = xg_data, aes(x = distance_to_goal_line, 
+                            y = ..density..,
+                             fill = is_goal)) + 
+  geom_histogram() + 
+  theme_bw() + 
+  scale_fill_manual(values = c("1" = "forestgreen", "0" = "gray"),
+                      name = "",
+                      labels = c("1" = "Goal", "0" = "No Goal")) + 
+  labs(title = "Histrogram of Distance to Goal for every shot \nseparated by goal variable",
+       y = "Proportion",
+       x = "Distance to goal (m)")
+
+```
+
+It looks like both the histogram for goals and non-goals have a mode at something like 10 meters. This is explained by the fact that most shots are taken from that distance, whether or not they turned into a goal. We must also notice that on the left part of the plot both histograms are similar, indicating that the closer a shot is taken to the goal, it is more likely for it to be converted. On the right side of the plot we can observe the opposite: the further the shot is taken, the more difficult it is to become a goal. 
+
+
+```{r}
+xg_data %>% 
+  select(distance_to_goal_line, 
+         angle_to_goal, eventSec2) %>% 
+  gather(key = "VARIABLE", value = "VALUE") %>% 
+  mutate(VARIABLE = factor(VARIABLE, 
+                           levels = c("angle_to_goal", "distance_to_goal_line", 
+                                      "eventSec2"),
+                           labels = c("Angle to\ngoal", "Distance to\ngoal", "Time of event (seconds)"))) %>%
+  ggplot(aes(x = VARIABLE, y = VALUE)) + 
+  geom_boxplot() + 
+  facet_wrap(~VARIABLE, 
+             scales = "free") + 
+  labs(x = "",
+       y = "")
+
+```
+
+
+## Logistic Regression
+
+
+
+```{r}
+### LDA with equal covariance and normal density??
+### Naive Bayes??
+
+## First of all, we will use a penalized logistic regression using the 
+## package glmnet
+
+## Action to review: we are going to assign 0 to the NA's coming from the 
+## passes
+
+
+train <- train %>% 
+  replace_na(
+    list(
+      passes_eventSec = 0, 
+      passes_is_own_goal = 0, 
+      passes_is_key_Pass = 0,
+      passes_is_through = 0, 
+      passes_is_accurate = 0,
+      passes_is_CA = 0, 
+      passes_foot = 0, 
+      passes_eventSec2 = 0, 
+      passes_skilled_foot = 0
+    )
+  ) %>% select(-passes_eventSec)
+
+train.lr <- train %>% 
+  select(-matchId, -teamId, -playerId, -id, -passes_is_own_goal) %>% 
+  mutate(passes_foot = if_else(passes_foot == "", "0", passes_foot)) # manual change
+
+
+y <- train.lr$is_goal
+x <- model.matrix(is_goal~. , train.lr, 
+                  na.action = "na.pass")
+
+
+
+
+## Questions: how to handle NAs?
+
+## 10 fold CV for choosing the lambda 
+cv.log_lasso <- cv.glmnet(x, y, family = "binomial", 
+                          alpha = 1, nfolds = 10)
+
+
+## We will choose the model that minimizes the LSE for lambda
+
+lambda_lse <- cv.log_lasso$lambda.1se
+lambda_min <- cv.log_lasso$lambda.min
+
+```
+
+```{r}
+plot(cv.log_lasso)
+```
+
+From the plot we can see that the logarithm of the two estimates that glm gives us ($\lambda_{LSE}$ and $\lambda_{min}$) choose models with approximately 13 and 22 nonzero coefficient estimates respectively after a 10-fold CV for LASSO regression. 
+
+We will train our model with both values for the penalization parameter and see which one gets the best performance in the test sample. 
+
+
+```{r}
+
+# training
+
+model_min <- glmnet(x, y, family = "binomial", alpha = 1, 
+                 lambda = lambda_min)
+
+model_lse <- glmnet(x, y, family = "binomial", alpha = 1, 
+                 lambda = lambda_lse)
+
+```
+
+The coefficients for the model using $\lambda_{LSE}$ are:
+
+```{r}
+coef(model_lse)
+```
+while the coefficients for $\lambda_{min}$ are:
+
+```{r}
+coef(model_min)
+```
+
+Now, let's test both this logistic regression models on the test sample!
+
+```{r}
+
+test <- test %>% 
+  replace_na(
+    list(
+      passes_eventSec = 0, 
+      passes_is_own_goal = 0, 
+      passes_is_key_Pass = 0,
+      passes_is_through = 0, 
+      passes_is_accurate = 0,
+      passes_is_CA = 0, 
+      passes_foot = 0, 
+      passes_eventSec2 = 0, 
+      passes_skilled_foot = 0
+    )
+  ) %>% select(-passes_eventSec)
+
+test.lr <- test %>% 
+  select(-matchId, -teamId, -playerId, -id, -passes_is_own_goal)
+
+y_test <- test.lr$is_goal
+x_test <- model.matrix(is_goal~. , test.lr, 
+                  na.action = "na.pass")
+
+
+y_lse <- predict(model_lse, newx = x_test, type = "response")
+# Which c to take?
+
+c <- 0.5
+
+y_lse <- if_else(y_lse > c, 1, 0)
+
+y_min <- predict(model_min, newx = x_test, type = "response")
+y_min <- if_else(y_min > c, 1, 0)
+```
+
+The mis-classification rate for the $\lambda_{LSE}$ is
+
+```{r}
+mean(y_lse != y_test)
+
+```
+and for the other one is
+
+```{r}
+mean(y_min != y_test)
+```
+
+
+What happens if we train the model only with the geographical variables?
+
+```{r}
+y_simple <- train.lr$is_goal
+x_simple <- model.matrix(is_goal~. , train.lr %>% 
+                           select(x_meter, y_meter, is_goal), 
+                  na.action = "na.pass")
+
+
+
+
+## Questions: how to handle NAs?
+
+## 10 fold CV for choosing the lambda 
+cv.log_lasso <- cv.glmnet(x_simple, y_simple, family = "binomial", 
+                          alpha = 1, nfolds = 10)
+
+model_simple <- glmnet(x_simple, y_simple, family = "binomial",
+                       alpha = 1 , lambda = cv.log_lasso$lambda.min)
+
+
+x_grid <- seq(50, 100, by = 0.5)
+y_grid <- seq(0, 100, by = 0.5)
+dummy <- 1
+field <- model.matrix( Var3~. ,expand.grid(x_grid, y_grid, 1))
+
+preds_simple <- predict(model_simple, newx = field, type = "response")
+
+```
+
+
+```{r}
+
+df_simple <- cbind(field, preds_simple) %>% data.frame()
+
+df_simple <- df_simple[,-1]
+
+colnames(df_simple) <- c("x", "y", "preds")
+
+ggplot(df_simple) + 
+    annotate_pitch(colour = "black",
+                       fill   = "white",
+                       limits = FALSE) +
+    geom_tile(data = df_simple, 
+               aes(x= x, y = y, fill = preds),
+               size = 0.8) +
+  scale_fill_gradient(low="white", high="blue") +
+        theme_pitch() +
+        theme(plot.background = element_rect(fill = "white"),
+              title = element_text(colour = "black"))  + 
+        coord_cartesian(xlim = c(50, 105)) + 
+  theme(legend.position = "bottom", legend.direction = "horizontal",
+              plot.title = element_text(hjust = 0.07, face = "plain"),
+              plot.subtitle = element_text(hjust = 0.07, size = 10, face = "italic"),
+              plot.caption = element_text(hjust = 0.95),
+              plot.margin = margin(1, 0.2, 0.5, 0.2, "cm")) + 
+  labs(title = "Simple logistic regression predictions")
+
+```
