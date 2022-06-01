@@ -82,16 +82,16 @@ get_passes <- function(file_path, name_detail, save_files = F){
           y = "y",
           x = "x") %>%
     unnest_wider(y, names_sep = "") %>%
-    unnest_wider(x, names_sep = "") %>%
-    dplyr::select(-c(x1, y1))
+    unnest_wider(x, names_sep = "")
   
   passes_ok <- passes %>%
-    dplyr::select(matchId, teamId, playerId, eventSec, matchPeriod, id) %>%
+    dplyr::select(matchId, teamId, playerId, eventSec, matchPeriod, id, subEventName) %>%
     bind_cols(pos, tags2) %>%
     filter(is_blocked == 0,
            is_own_goal == 0, 
            is_intercepted == 0) %>%
-    dplyr::select(-starts_with("tags_")) %>%
+    dplyr::select(-starts_with("tags_"), -is_blocked, -is_own_goal, -is_intercepted,
+                  - is_accurate, -height_pass) %>%
     left_join(players %>%
                 dplyr::select(c("wyId", "foot")), by = c("playerId" = "wyId")) %>%
     mutate(league = name_detail)
@@ -122,8 +122,13 @@ get_shots_and_passes <- function(file_path, name_detail, save_filestop = F){
     mutate(eventSec2 = ifelse(matchPeriod == "2H", eventSec + 2700, eventSec),
            time_prev = ifelse(matchId == lag(matchId) & matchPeriod == lag(matchPeriod) & teamId == lag(teamId), eventSec - lag(eventSec), -1),
            time_prev = ifelse(is.na(time_prev), -1, time_prev),
-           skilled_foot = ifelse(body_part == "head/body", body_part,
-                                 ifelse(body_part == foot, "Yes", "No")),
+           skilled_foot = 
+             case_when(
+               body_part == "head/body" ~ body_part,
+               body_part == foot ~ "Yes",
+               foot == "both" ~ "Yes", 
+               TRUE ~ "No"
+             ),
            x_meter = x1 * 105/100,
            y_meter = y1 * 68/100,
            distance_to_goal_line = sqrt((105 - x_meter)^2 + (32.5 - y_meter)^2),
@@ -135,16 +140,23 @@ get_shots_and_passes <- function(file_path, name_detail, save_filestop = F){
     mutate(eventSec2 = ifelse(matchPeriod == "2H", eventSec + 2700, eventSec),
            time_prev = ifelse(matchId == lag(matchId) & matchPeriod == lag(matchPeriod) & teamId == lag(teamId), eventSec - lag(eventSec), -1),
            time_prev = ifelse(is.na(time_prev), -1, time_prev),
-           skilled_foot = ifelse(body_part == "head/body", body_part,
-                                 ifelse(body_part == foot, "Yes", "No")),
-           x_meter = x2 * 105/100,
-           y_meter = y2 * 68/100) %>%
+           skilled_foot = 
+             case_when(
+               body_part == "head/body" ~ body_part,
+               body_part == foot ~ "Yes",
+               foot == "both" ~ "Yes", 
+               TRUE ~ "No"
+             ),
+           x1_meter = x1 * 105/100,
+           y1_meter = y1 * 68/100,
+           x2_meter = x2 * 105/100,
+           y2_meter = y2 * 68/100) %>%
     filter(!is.na(skilled_foot)) %>% 
-    select(matchId, teamId, matchPeriod,  y2, x2, eventSec, starts_with("is"),
-           foot, eventSec2, skilled_foot, x_meter, y_meter)
+    select(matchId, teamId, matchPeriod,subEventName,  y2, x2, x1, y1, eventSec, starts_with("is"),
+           foot, eventSec2, skilled_foot,x2_meter, y2_meter, x1_meter, y1_meter)
   
   
-  names(passesB)[6:ncol(passesB)] <- str_c("passes_",names(passesB)[6:ncol(passesB)])
+  names(passesB)[7:ncol(passesB)] <- str_c("passes_",names(passesB)[7:ncol(passesB)])
   
   shots_final <- shotsB %>% 
     left_join(passesB, 
@@ -165,7 +177,32 @@ get_shots_and_passes <- function(file_path, name_detail, save_filestop = F){
            ) %>% filter(keep == 1) %>% 
     group_by(id) %>% 
     mutate(n = n()) %>% 
-    ungroup() 
+    ungroup() %>% 
+    filter(n == 1) %>% 
+    select(- passes_x2_meter, - passes_y2_meter, -n, -keep, - passes_foot, - foot, 
+           -is_blocked, - body_part, - time_prev, -contains("Id"), -id, -passes_x1, -passes_y1, 
+           -passes_eventSec, -n, -keep, -eventSec, -x1, -y1, -passes_eventSec2) %>% 
+    mutate(passes_distance = sqrt((x_meter - passes_x1_meter)^2 + (y_meter - passes_y1_meter)^2),
+           is_goal = case_when(
+             is_goal == 0 & passes_is_assist == 1 ~ 1,
+             TRUE ~ is_goal
+           )) %>% 
+    replace_na(
+      list(
+        subEventName = "No Pass",
+        passes_is_assist = "No Pass",
+        passes_is_key_Pass = "No Pass",
+        passes_is_through = "No Pass",
+        passes_is_CA = "No Pass",
+        passes_skilled_foot = "No Pass",
+        passes_x1_meter = "No Pass",
+        passes_y1_meter = "No Pass", 
+        passes_distance = "No Pass"
+      )
+    ) %>% select(-passes_is_assist)
+  
+  
+  
   
     file <- str_c("processed_data/shots_final_", name_detail, ".RData")
   if(save_filestop){save(shots_final, file = file)}
@@ -183,14 +220,7 @@ shotsSP <- get_shots_and_passes("dataset/events/events_Spain.json", "SP", T)
 final <- rbind(shotsEN, shotsFR, shotsGE, shotsIT, shotsSP)
 
 
-final %>% 
-  group_by(is_goal, passes_is_assist) %>% tally()
 
-
-apply(final, 2, function(x)sum(is.na(x)))
-
-# We will make an indicator to express when the shot has a previous pass
-final$passes_na <- apply(final %>% select(starts_with("passes")), 1, function(x)sum(is.na(x)))
 
 
 save(final, file = "processed_data/FINAL_DATA.RData")
@@ -198,4 +228,5 @@ save(final, file = "processed_data/FINAL_DATA.RData")
 
 sum(final$is_goal)
 
-
+unique(final$skilled_foot)
+unique(final$passes_skilled_foot)
