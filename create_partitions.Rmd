@@ -1,0 +1,44 @@
+---
+title: "Create Partitions and Final Data Cleaning"
+author: "Federico Chung"
+date: '2022-06-01'
+output: html_document
+---
+
+
+```{r}
+library(groupdata2)
+```
+
+
+
+```{r}
+load("processed_data/FINAL_DATA.RData")
+final$passes_distance[final$passes_distance == "No Pass"] <- 0
+final$passes_distance<- as.integer(final$passes_distance)
+final<-select(final, -c(passes_x1_meter, passes_y1_meter))
+final
+```
+```{r}
+partition<- partition(
+  final,
+  p = c(0.7,0.15,0.15),
+  cat_col = c("skilled_foot","league"),
+  num_col = "is_goal"
+)
+```
+
+```{r}
+train<-partition[[1]]
+validation<-partition[[2]]
+test<-partition[[3]]
+```
+
+```{r}
+save(train, file = "train.RData")
+save(test, file = "test.RData")
+save(validation, file = "validation.RData")
+```
+
+
+
