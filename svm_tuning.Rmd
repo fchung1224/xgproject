@@ -1,0 +1,23 @@
+---
+title: "svm_tuning"
+author: "Federico Chung"
+date: '2022-06-03'
+output: html_document
+---
+
+```{r}
+library(e1071)
+library(dplyr)
+load("train.RData")
+train_subset<-train%>%
+  select_if(is.numeric)%>%
+  select(-c(is_CA, passes_distance))
+  ## tune `svm' for classification with RBF-kernel (default in svm),
+  ## using one split for training/validation set
+train_subset
+svm <- tune(svm, is_goal~., data = train_subset, kernel = "linear",
+            ranges = list(gamma = 2^(-1:1), cost = 2^(2:4))
+           )
+svm$best.parameters
+```
+

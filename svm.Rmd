@@ -1,0 +1,257 @@
+---
+title: "SVM"
+author: "Federico Chung"
+date: '2022-06-01'
+output: html_document
+---
+
+```{r}
+if(!require("tidyverse")){install.packages("tidyverse")}
+if(!require("knitr")){install.packages("knitr")}
+if(!require("ggcorrplot")){install.packages("ggcorrplot")}
+if(!require("ggsoccer")){install.packages("ggsoccer")}
+if(!require("glmnet")){install.packages("glmnet")}
+
+library(tidyverse)
+library(knitr)
+library(ggcorrplot)
+library(ggsoccer)
+library(glmnet)
+library(stringr)
+library(dplyr)
+
+```
+
+
+```{r}
+# We read the data 
+load("train.RData")
+load("validationtrain.RData")
+load("test.RData")
+```
+
+
+```{r}
+train<- train|>
+  filter(subEventName != "Hand pass" & subEventName != "Launch") |>
+  mutate(across(where(is.character), str_remove_all, pattern = fixed(" ")))
+test<- test%>%filter(subEventName != "Hand pass" & subEventName != "Launch") %>% 
+  mutate(across(where(is.character), str_remove_all, pattern = fixed(" ")))
+
+train
+```
+
+```{r}
+
+# making the model matrix subset based on selected predictors from forward selection
+x <- model.matrix( ~ -1 + is_goal +eventSec2 + x_meter + y_meter + distance_to_goal_line + subEventName + skilled_foot +  passes_is_key_Pass + matchPeriod + is_CA + passes_is_through,
+                  data = train)
+x_train<- as.data.frame(x)
+x_train$is_goal<- as.factor(x_train$is_goal)
+train_model_data<- x_train %>%
+    mutate_if(is.numeric, scale)
+train_model_data
+```
+```{r}
+# making the model matrix subset based on selected predictors from forward selection
+x <- model.matrix( ~ -1 + is_goal +eventSec2 + x_meter + y_meter + distance_to_goal_line + subEventName + skilled_foot +  passes_is_key_Pass + matchPeriod + is_CA + passes_is_through,
+                  data = test)
+x_test<- as.data.frame(x)
+x_test['is_goal']<- lapply(x_test["is_goal"] , factor)
+
+test_model_data<- x_test %>%
+    mutate_if(is.numeric, scale)
+```
+
+
+```{r}
+library(e1071)
+```
+
+```{r}
+svm_linear = svm(is_goal ~ . , data = train_model_data, type = 'C-classification', kernel = 'linear')
+pred_linear = predict(svm_linear, newdata = test_model_data)
+#Confusion Matrix Linear
+table(test_model_data$is_goal, pred_linear)
+```
+
+```{r}
+svm_quadratic = svm(is_goal ~ . , data = train_model_data, type = 'C-classification', kernel = 'polynomial', degree = 2)
+pred_quadratic = predict(svm_quadratic, newdata = test_model_data)
+#Confusion Matrix Quadratic
+table(test_model_data$is_goal, pred_quadratic)
+```
+
+```{r}
+svm_cubic = svm(is_goal ~ . , data = train_model_data, type = 'C-classification', kernel = 'polynomial', degree = 3)
+pred_cubic = predict(svm_cubic, newdata = test_model_data)
+#Confusion Matrix Cubic
+table(test_model_data$is_goal, pred_cubic)
+```
+
+```{r}
+# tuning parameter is the radial kernel 
+svm_radial = svm(is_goal ~ . , data = train_model_data, type = 'C-classification', kernel = 'radial')
+pred_radial = predict(svm_radial, newdata = test_model_data)
+#Confusion Matrix Cubic
+table(test_model_data$is_goal, pred_radial)
+```
+
+```{r}
+#plot for later
+a<- select(x_test, c("is_goal","x_meter","y_meter"))
+svm_results_test <- as.data.frame(cbind(a,pred_linear,pred_quadratic,pred_cubic,pred_radial ))
+svm_results_test<- svm_results_test%>% 
+  mutate(x2 = x_meter*100/105, 
+         y2 = y_meter*100/68)%>%
+  mutate(is_goal2 = ifelse(is_goal == 1, T, F))%>%
+  mutate(pred_linear = ifelse(pred_linear == 1, T, F))%>%
+  mutate(pred_quadratic = ifelse(pred_quadratic == 1, T, F))%>%
+  mutate(pred_cubic = ifelse(pred_cubic == 1, T, F))
+```
+```{r}
+library(caret)
+library(e1071)
+svmRadial2ModelInfo <- list(
+  label   = "Support Vector Machines with Radial Kernel based on libsvm",
+  library = "e1071",
+  type    = c("Regression", "Classification"),
+  parameters = data.frame(parameter = c("cost", "gamma"),
+                          class = c("numeric", "numeric"),
+                          label = c("Cost", "Gamma")),
+  grid    = function(x, y, len = NULL, search = NULL) {
+              sigmas <- kernlab::sigest(as.matrix(x), na.action = na.omit, scaled = TRUE)
+              return( expand.grid(gamma = mean(as.vector(sigmas[-2])),
+                                  cost  = 2 ^((1:len) - 3)) )
+  },
+  loop    = NULL,
+  fit     = function(x, y, wts, param, lev, last, classProbs, ...) {
+              if(any(names(list(...)) == "probability") | is.numeric(y))
+              {
+                out <- svm(x = as.matrix(x), y = y,
+                           kernel = "radial",
+                           cost  = param$cost,
+                           gamma = param$gamma,
+                           ...)
+              } else {
+                out <- svm(x = as.matrix(x), y = y,
+                           kernel = "radial",
+                           cost  = param$cost,
+                           gamma = param$gamma,
+                           probability = classProbs,
+                           ...)
+              }
+              out
+  },
+  predict = function(modelFit, newdata, submodels = NULL) {
+    predict(modelFit, newdata)
+  },
+  prob    = function(modelFit, newdata, submodels = NULL) {
+    out <- predict(modelFit, newdata, probability = TRUE)
+    attr(out, "probabilities")
+  },
+  varImp = NULL,
+  predictors = function(x, ...){
+    out <- if(!is.null(x$terms)) predictors.terms(x$terms) else x$xNames
+    if(is.null(out)) out <- names(attr(x, "scaling")$x.scale$`scaled:center`)
+    if(is.null(out)) out <-NA
+    out
+  },
+  levels = function(x) x$levels,
+  sort   = function(x) x[order(x$cost, -x$gamma),]
+)
+```
+
+
+```{r}
+
+train_model_data
+# using e1071 to tune svm
+
+tune(svm, train.x = train_model_data[,2:5]  , train.y = train_model_data[,1])
+```
+
+
+```{r}
+#rcode
+tune_degree_linear <- tune.svm(is_goal ~ . , data = train_model_data,
+                       type = "C-classification",
+                       kernel = "linear", 
+                       cost = 2^(seq(from = -10, to = 10, by = 0.5)))
+save(tune_degree_linear, file = "tune_degree_linear")
+
+tune_degree_quadratic<- tune.svm(is_goal ~ . , data = train_model_data,
+                       type = "C-classification",
+                       kernel = "polynomial", 
+                       degree = 2,
+                       cost = 2^(seq(from = -1, to = 2, by = 0.5)))
+save(tune_degree_quadratic, file = "tune_degree_quadratic")
+
+tune_degree_cubic <- tune.svm(is_goal ~ . , data = train_model_data,
+                       type = "C-classification",
+                       kernel = "polynomial", 
+                       degree = 3,
+                       2^(seq(from = -1, to = 2, by = 0.5)))
+
+```
+
+```{r}
+load(file = "tune_degree_linear")
+
+```
+
+```{r}
+library(e1071)
+plot(svm_radial, formula = is_goal~. , data = train_model_data)
+```
+
+
+
+
+```{r}
+#visualizations of final model
+ggplot(data = svm_results_test, aes(y = y2, x = x2)) +
+        annotate_pitch(colour = "white",
+                       fill   = "black",
+                       limits = FALSE) +
+        theme_pitch() +
+        theme(plot.background = element_rect(fill = "black"),
+              title = element_text(colour = "white")) +
+        coord_flip(xlim = c(51, 101),
+                   ylim = c(-1, 101)) +
+        geom_jitter(aes(fill = factor(pred_linear, levels = c("TRUE", "FALSE"))),
+                    alpha = 0.3, shape = 21, size = 0.8) +
+        facet_wrap(~is_goal2, nrow = 1) +
+        scale_fill_manual(values = c("red", "#00BFFF")) +
+        scale_colour_manual(values = c("red", "#00BFFF")) +
+        theme(legend.position = c(0.75, 1.12), legend.direction = "horizontal",
+              legend.text = element_text(color = "white", size = 8, face = "plain"),
+              legend.background = element_rect(fill = "black"),
+              legend.key = element_rect(fill = "black"),
+              strip.background=element_rect(fill = "black"),
+              strip.text = element_text(colour = "black"),
+              plot.title = element_text(hjust = 0.07, face = "plain"),
+              plot.subtitle = element_text(hjust = 0.07, size = 10, face = "italic"),
+              plot.caption = element_text(hjust = 0.95),
+              plot.margin = margin(1, 0.2, 0.5, 0.2, "cm")) +
+        labs(fill = "Goal Prediction",caption = "No Goal                                                                                                  Goal ") +
+        guides(fill = guide_legend(override.aes = list(alpha = 0.8, size = 2), reverse=T)) +
+        ggtitle("Linear Kernel SVM", "Top 5 European Leagues 2017-2018")
+
+
+```
+
+
+
+```{r}
+# how to build ROC PLOTS
+library(pROC)
+roc <- roc(as.numeric(test_model_data$is_goal), as.numeric(pred_radial))
+plot.roc(roc, print.auc = TRUE, print.thres = "best")
+```
+
+
+
+
+
+
