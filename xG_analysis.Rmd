@@ -23,6 +23,7 @@ if(!require("MASS")){install.packages("MASS")}
 if(!require("caret")){install.packages("caret")}
 if(!require("MLmetrics")){install.packages("MLmetrics")}
 
+
 library(tidyverse)
 library(knitr)
 library(ggcorrplot)
@@ -87,6 +88,33 @@ xg_data %>%
 ```
 As we can see, the English Premier League had the most goals on open plays out of the 5 main leagues. However, only the Italian Serie A seems to have had a slightly lower conversion rate on shots on open plays. 
 
+```{r}
+
+convert_factors <- function(x){as.numeric(as.character(x))}
+
+
+xg_data_passes <-  xg_data %>% 
+  filter(passes_is_key_Pass != "No Pass") %>% 
+  dplyr::select(-matchPeriod, -league, -subEventName, -skilled_foot, 
+                -passes_skilled_foot) %>% 
+  mutate_all(convert_factors) 
+
+# Correlation matrix plot for shots from passes
+corr_passes <- round(cor(xg_data_passes), 4)
+ggcorrplot(corr_passes) 
+
+
+# Correlation matrix plot for shots not from passes
+xg_data_np <-  xg_data %>% 
+  filter(passes_is_key_Pass != "No Pass") %>% 
+  dplyr::select(-contains("passes")) %>% 
+  dplyr::select(-matchPeriod, -league, -subEventName, -skilled_foot)
+
+corr_np <- round(cor(xg_data_np), 4)
+ggcorrplot(corr_np) 
+
+
+```
 
 
 
@@ -293,7 +321,7 @@ calibration.lr <- data.frame(
   ) %>% 
   ungroup() %>% 
   mutate(
-    upper_bound = seq(0.1, 1, by = 0.1)
+    upper_bound = seq(0.1, 0.9, by = 0.1)
   )
 
 
@@ -306,7 +334,7 @@ calibration.lr %>%
   theme_bw() + 
   labs(main = "Calibration scatterplot for the logistic regression xG model",
         y = "Prediction bin",
-        x = "Observed relative frecuencies of goals")
+        x = "Observed relative frequencies of goals")
 
 
 ```
@@ -610,6 +638,7 @@ train.gbm <- train %>%
   dplyr::select(matchPeriod, is_CA, eventSec2, x_meter, y_meter, skilled_foot, distance_to_goal_line, passes_is_key_Pass, subEventName,
           passes_is_through, is_goal)
 
+plot(train.gbm)
 
 ```
 
@@ -754,7 +783,7 @@ calibration.gbm %>%
   theme_bw() + 
   labs(main = "Calibration scatterplot for the boosting xG model",
         y = "Prediction bin",
-        x = "Observed relative frecuencies of goals")
+        x = "Observed relative frequencies of goals")
 
 
 ```
