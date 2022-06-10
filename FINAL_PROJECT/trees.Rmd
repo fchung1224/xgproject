@@ -1,0 +1,311 @@
+---
+title: "trees"
+author: "Federico Chung"
+date: "6/7/2022"
+output: html_document
+---
+
+```{r}
+# using trees to see which types of passes before a goal tend to be most effective
+
+library(randomForest)
+library(datasets)
+library(caret)
+library(tidyverse)
+library(knitr)
+library(ggcorrplot)
+library(ggsoccer)
+library(glmnet)
+library(ROCR)
+library(gbm)
+library(MASS)
+library(MLmetrics)
+
+# load the data
+load("train.RData")
+load("test.RData")
+load("validation.RData")
+```
+
+Trees allow for partitions based on recursive binary splitting. Create a binary split whether a player will score a goal or not. 
+
+What are the sets of binary questions we will ask? 
+
+What are the splits that best maximizes classification rate?
+
+```{r}
+library(dplyr)
+library(stringr)
+train<-train %>%
+  mutate(across(where(is.character), str_remove_all, pattern = fixed(" ")))%>%
+  filter(! subEventName %in% c("Headpass","Handpass", "Launch"))
+
+x <- model.matrix( ~ -1 +.,
+                  data = train)
+x_train<- as.data.frame(x)
+x_train
+```
+
+```{r}
+test<- test%>%
+  mutate(across(where(is.character), str_remove_all, pattern = fixed(" ")))%>%
+  filter(!subEventName %in% c("Headpass","Handpass", "Launch"))
+x <- model.matrix( ~ -1 +.,
+                  data = test)
+x_test<- as.data.frame(x)
+```
+
+```{r}
+validation<- validation%>% 
+  mutate(across(where(is.character), str_remove_all, pattern = fixed(" ")))%>%
+  filter(! subEventName %in% c("Headpass","Handpass", "Launch"))
+x <- model.matrix( ~ -1 +.,
+                  data = validation)
+x_validation<- as.data.frame(x)
+```
+
+
+
+How many partitions do we want in each split? Use the validation set to evaluate. Bias and Variance are traded off by growing smaller/ larger trees. 
+
+How big should we grow the tree?
+
+We evaluate Classification Trees to minimize node impurity. Some of these measures include misclassification error, gini index
+
+The second method we used was random forests. It is a very good prediction method that builds a large collection of B de-correlated trees. Trees allow for partitions based on recursive binary splitting we create a binary split whether a player will score a goal or not.  
+
+The random forest algorithm performs bagging on trees, but it limits the amount of randomly chosen variables it can use for each split. Using the package 'ranger' ([]), a OOB validation was applied to the training set in order to select the best tuning parameters for the random forest. 
+
+
+We will tune two parameters for the random forest algorithm:
+
+* m -> limit of randomly chosen predictors for each split
+* $n_{min}$ -> minimum node size. Setting this number larger causes smaller trees to be grown (depth parameter).
+
+Recommendations from the inventors of the Random Forest Models suggest we should use $m = \sqrt{n}$ while $n_{min} = 1$, for classification.  We decided to tune these parameters using OOB. Unlike CV, OOB summarizes the overall misclassification rates when applying each of the B resample trees to the out of bag cases that were not part of the resample. 
+
+
+```{r}
+library(ranger)
+#using the ranger package to estimate
+tunegrid<- expand.grid(
+  .mtry = 2:14,
+  .splitrule = "gini",
+  .min.node.size = 1:3
+)
+
+forest_model_2 <- train(
+    as.factor(is_goal) ~.,
+    data = x_train,
+    method = "ranger",
+    num.trees = 500,
+    tuneGrid = tunegrid,
+    trControl = trainControl(method = "oob"),
+    metric = "Accuracy",
+    importance = "impurity",
+    na.action = na.omit
+  )
+
+
+```
+
+```{r}
+plot(forest_model_2)
+```
+
+
+We can see the effects of the variance-bias tradeoff when we look at the number of randomly selected predictors m. The bigger m is we tend to get OOB accuracy, but there comes a point where too many predictors is detrimental to the accuracy of the model due to overfitting. That is why we see a concave shape for all 3 different node sizes. Minimum node size seems to not have a big effect on the OOB estimates of our models. However it is important to note that $n_{min}=1$ is not always going to lead to the best OOB estimates. In fact OOB Accuracy seems to be higher with $n_{min}=2,3$ for certain predictor sizes such as 9-11. 
+
+```{r}
+forest_model_2$finalModel
+```
+
+Our tuning estimates shows that the best random forest model has a $n_{min} = 2$ with $m = 6$. 
+
+
+```{r}
+variable_importance <- as.data.frame(importance(forest_model_2$finalModel))
+colnames(variable_importance)
+d <- variable_importance
+names <- rownames(d)
+rownames(d) <- NULL
+variable_importance_new <- cbind(names,d)
+colnames(variable_importance_new)<- c("predictor", "var_importance")
+variable_importance_new
+library(dplyr)
+variable_importance_new|>
+  arrange(desc(var_importance))|>
+  ggplot(aes(x = reorder(predictor, var_importance), y = var_importance))+
+  geom_bar(stat = "identity")+
+  coord_flip()+
+  xlab("Variable")+
+  ylab("Mean Decrease in impurity (Gini Importance)")
+ggsave("variable_importance.png")
+```
+Our model evaluates variable importance using the mean decrease in Gini which is a measure of node purity. Overall from what we can see in our variable importance plot is that continuous variables tend to have higher importance than categorical variables, but this is expected as continuous variables are split more often than categorical variables. From what our model suggests, passes leading to the goal do not tend to have high importance in predicting whether a shot will lead to a Goal. One passing variable which is if the pass was a key pass tends to be highly predictive of whether a player will score, and it is expected as the definition for key pass in wyscout is the following: "A pass that immediately creates a clear goal scoring opportunity for a teammate"[wyscout]. However the type of pass, cross, through pass, head pass, high pass do not seem to be as important. Instead, variables that directly measure the state of the shot such as the distance to the goal line and the angle of the shot tend to be far more important in determining whether a shot will end up to a Goal. 
+
+```{r}
+# in-sample evaluations
+pred<- forest_model_2$finalModel$predictions
+table(x_train$is_goal, pred)
+```
+
+
+```{r}
+# out-sample evaluations
+predictions<- predict(forest_model_2, newdata = x_test)
+table(x_test$is_goal, predictions)
+```
+
+```{r}
+#forest model evaluation using the values we got in the validation sample
+
+final_model_for_validation <-ranger(is_goal ~ .,mtry = 6, min.node.size = 2, data = x_train, probability = TRUE)
+```
+
+
+```{r}
+#calibration using the validation dataset
+x_validation
+
+y_val <- x_validation$is_goal
+y_pred <- predict(final_model_for_validation, 
+                 data = x_validation, type = "response")$predictions[,1]
+# We will make bins of around of 1% for predictons 
+# until p=0.3 and then of 20% afterwards
+calibration.lr <- data.frame(
+  y_val, # is_goal
+  y_pred,
+  bin=cut(y_pred,
+          c(seq(0, 1, by = 0.1)),
+          include.lowest=TRUE)) %>% 
+  group_by(bin) %>% 
+  summarize(
+    n = n(), 
+    mean_observed = mean(y_val)
+  ) %>% 
+  ungroup() %>% 
+  mutate(
+    upper_bound = seq(0.1, 1, by = 0.1)
+  )
+
+
+
+calibration.lr %>% 
+  ggplot(aes(x = mean_observed, y = bin)) + 
+  geom_point(aes(size = n)) + 
+  geom_line(data = calibration.lr, 
+            aes(x = upper_bound, y = bin, group = 1), color = "red") + 
+  theme_bw() + 
+  labs(main = "Calibration scatterplot for the logistic regression xG model",
+        y = "Prediction bin",
+        x = "Observed relative frequencies of goals")
+ggsave("calibrationplot.png")
+```
+
+For the random forest predictions we can see that the model also overpredicts shots that do not turn to goals. This will potentially lead to a smaller cutoff rate to increase accuracy. 
+
+```{r}
+
+# Plots for helping us decide the cutoff
+c <- seq(0, 1, by = 0.01)
+
+results_c <- data.frame(
+  Misclassfication = numeric(length(c)),
+  Sensitivity = numeric(length(c)),
+  Specificity = numeric(length(c)),
+  Precision = numeric(length(c)),
+  AUC = numeric(length(c))
+)
+
+for(i in 1:length(c)){
+
+    ci <- c[i]
+    y_labels <- if_else(y_pred > ci, 1, 0)
+    
+    tp <- sum(y_val == 1 & y_labels == 1)
+    tn <- sum(y_val == 0 & y_labels == 0)
+    fp <- sum(y_val == 0 & y_labels == 1)
+    fn <- sum(y_val == 1 & y_labels == 0)
+    
+    nrow(validation) - tp - tn - fp - fn
+    
+    #misclassification 
+    
+    results_c[i, "Misclassfication"] <- mean(y_labels != y_val)
+    
+    # sensitivity (tp/(tp + fn))
+    
+    results_c[i, "Sensitivity"] <- tp/(tp + fn)
+    results_c[i, "Specificity"] <- tn/(tn + fp)
+    results_c[i, "Precision"] <- tp/(tp + fp)
+    
+    
+    pred_val <- prediction(y_labels, y_val)
+    auc_val <- performance(pred_val, measure = "auc")
+    auc_val <- round(auc_val@y.values[[1]], 4)
+    
+    
+    results_c[i, "AUC"] <- auc_val
+    
+
+}
+
+results_c <- results_c %>% 
+  mutate(Threshold = c) 
+
+results_c%>% 
+  gather(-Threshold, key = "Rate", value = "Value") %>% 
+  ggplot(aes(x = Threshold, y = Value, color = Rate)) + 
+  geom_line() + 
+  theme_bw()
+ggsave("AUC_rf.png")
+
+# We choose the threshold that mimize misclassification and maximize AUC
+
+t.min.M <- c[which.min(results_c$Misclassfication)]
+t.max.P <- c[which.max(results_c$Precision)]
+ max(results_c$AUC)
+```
+
+Here we can see the tradeoff of increasing or decreasing the threshold. Because we predict more goals the lower the threshold, the more likely we are to have more false positives. Becuase there are more no goals than no goals, it makes sense that misclassification decreases fastly at the lower threshold levels and doesnt increase as much as we increase the threshold. In the case in which we wanted to minimize the misclassification error, our validation set tells us to set the threshold to 0.52, getting a misclassification rate of 0.1138, which is higher than the misclassification rate of the logistic regression. The problem with just looking at misclassification or accuracy in our models is that we tend to predict less goals. The greatest AUC = 0.7621 is achieved when the threshold is 0.12, this makes sense as there are more no goals than goals in the model so if we wanted to balance specificity and sensitivity this would be the best threshold, but in this case we wiould over estimate our xG predictions. The results and thresholds for
+
+
+
+```{r}
+y_lse <- predict(final_model_for_validation, data = x_test, type = "response")$predictions[,1]
+# Now we must make predictions based on the probabilites 
+y_test <- x_test$is_goal
+
+# First threshold for lowest Misclassification 
+y_labs.min.m <- if_else(y_lse > t.min.M, 1, 0)
+# Misclassification  rate = 11.38%
+mean(y_labs.min.m != y_test)
+pred_lse <- prediction(y_labs.min.m, y_test)
+auc_lse <- performance(pred_lse, measure = "auc")
+auc_lse <- round(auc_lse@y.values[[1]], 4)
+perf_lse <- performance(pred_lse, measure = "tpr", x.measure = "fpr")
+plot(perf_lse,colorize=FALSE, col="black", 
+     main = "ROC curve for Random Forest for xG\n
+     Threshold = 0.52")
+lines(c(0,1),c(0,1),col = "gray", lty = 4 )
+
+
+# SECOND threshold
+y_labs.max.p <- if_else(y_lse > t.max.P, 1, 0)
+# Misclassification  rate
+mean(y_labs.max.p != y_test)
+pred_lse <- prediction(y_labs.max.p, y_test)
+auc_lse <- performance(pred_lse, measure = "auc")
+auc_lse <- round(auc_lse@y.values[[1]], 4)
+auc_lse
+perf_lse <- performance(pred_lse, measure = "tpr", x.measure = "fpr")
+plot(perf_lse,colorize=FALSE, col="black", 
+     main = "ROC curve for LASSO penalized logistic regression for xG\n
+     using 10-fold CV")
+lines(c(0,1),c(0,1),col = "gray", lty = 4 )
+```
+
+Logistic Regression has a misclassification rate in the test sample of 0.1154, while random forest has a misclassification rate of 0.1138
+
+Random Forest has the lowest misclassification rate at 0.1138, but that is not very significant the the more simpler logistic regression model which has a misclassification rate of 0.1154. And boosting has the worst misclassificataion rate at 0.1371

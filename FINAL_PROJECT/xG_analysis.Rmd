@@ -1,0 +1,964 @@
+---
+title: "xG EDA"
+author: "Federico Chung / Alejandro Olaya"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Libraries
+
+```{r, warning=F, message = F}
+if(!require("tidyverse")){install.packages("tidyverse")}
+if(!require("knitr")){install.packages("knitr")}
+if(!require("ggcorrplot")){install.packages("ggcorrplot")}
+if(!require("ggsoccer")){install.packages("ggsoccer")}
+if(!require("glmnet")){install.packages("glmnet")}
+if(!require("ROCR")){install.packages("ROCR")}
+if(!require("gbm")){install.packages("gbm")}
+if(!require("MASS")){install.packages("MASS")}
+if(!require("caret")){install.packages("caret")}
+if(!require("MLmetrics")){install.packages("MLmetrics")}
+
+
+library(tidyverse)
+library(knitr)
+library(ggcorrplot)
+library(ggsoccer)
+library(glmnet)
+library(ROCR)
+library(gbm)
+library(MASS)
+library(caret)
+library(MLmetrics)
+```
+
+# Exploratory Data Analysis
+
+```{r}
+
+# We read the data 
+
+load("train.RData")
+load("validation.RData")
+load("test.RData")
+
+test <- test %>% 
+  filter(!subEventName %in% c("Launch", "Hand Pass", "Head Pass"))
+
+train <- train %>% 
+  filter(!subEventName %in% c("Launch", "Hand Pass", "Head Pass"))
+
+validation <- validation %>% 
+  filter(!subEventName %in% c("Launch", "Hand Pass", "Head Pass"))
+
+# We merge them together and separate them while doing the pertinent 
+# analsysis
+
+xg_data <- rbind(test, train, validation) %>% 
+  filter(!subEventName %in% c("Launch", "Hand Pass", "Head Pass"))
+
+
+goals <- sum(xg_data$is_goal)
+shots <- nrow(xg_data)
+
+
+
+prop <- round(goals*100/shots, 2)
+```
+
+First of all, we have to recognize that we have `r goals` total goals out of a sample of `r shots` shots. This means that `r prop` % of our sample is a goal. Our training, test and validation sets all have a very similar proportion of goals. 
+
+When we analyze the complete data set by league, we find that 
+
+```{r}
+
+xg_data %>% 
+  group_by(league) %>% 
+  summarize(Goals = sum(is_goal),
+            n = n()) %>% 
+  mutate(Percentage = Goals*100/n) %>% 
+  arrange(desc(Goals)) %>% 
+  kable()
+
+
+```
+As we can see, the English Premier League had the most goals on open plays out of the 5 main leagues. However, only the Italian Serie A seems to have had a slightly lower conversion rate on shots on open plays. 
+
+```{r}
+
+convert_factors <- function(x){as.numeric(as.character(x))}
+
+
+xg_data_passes <-  xg_data %>% 
+  filter(passes_is_key_Pass != "No Pass") %>% 
+  dplyr::select(-matchPeriod, -league, -subEventName, -skilled_foot, 
+                -passes_skilled_foot) %>% 
+  mutate_all(convert_factors) 
+
+# Correlation matrix plot for shots from passes
+corr_passes <- round(cor(xg_data_passes), 4)
+ggcorrplot(corr_passes) 
+
+
+# Correlation matrix plot for shots not from passes
+xg_data_np <-  xg_data %>% 
+  filter(passes_is_key_Pass != "No Pass") %>% 
+  dplyr::select(-contains("passes")) %>% 
+  dplyr::select(-matchPeriod, -league, -subEventName, -skilled_foot)
+
+corr_np <- round(cor(xg_data_np), 4)
+ggcorrplot(corr_np) 
+
+
+```
+
+
+
+```{r}
+
+d1 <- xg_data %>% 
+  group_by(matchPeriod) %>% 
+  summarise(Goals = sum(is_goal),
+            n = n()) %>% 
+  mutate(Percentage = round(Goals*100/n, 4))
+
+d2 <- xg_data %>% 
+  group_by(is_CA) %>% 
+  summarise(Goals = sum(is_goal),
+            n = n()) %>% 
+  mutate(Percentage = round(Goals*100/n, 4))
+
+d3 <- xg_data %>% 
+  group_by(skilled_foot) %>% 
+  summarise(Goals = sum(is_goal),
+            n = n()) %>% 
+  mutate(Percentage = round(Goals*100/n, 4))
+
+
+```
+
+In the tables below we can see that the percentage of open shots converted is a little higher for the second period than the first one as well that shots coming from counter-attacks have a higher conversion rate. Finally, it is a little astonishing that shooting with your least skilled foot has a higher conversion rate than shooting with the skilled foot. 
+```{r}
+
+knitr::kable(
+  list(d1, d2)
+)
+
+
+knitr::kable(
+  list(d3)
+)
+```
+
+
+Now, let's see what happens with our continuous variables! 
+
+As we can observe from the following figure, the closer a player shoots to the goal, the more probability he has to scoring a goal. It seems like our model should consider our $(x,y)$ positional variables. 
+
+```{r}
+  xg_data <- xg_data %>% mutate(is_goal = as.factor(is_goal)) %>% 
+  mutate(x2 = x_meter*100/105, 
+         y2 = y_meter*100/68)
+  
+ggplot(xg_data) + 
+    annotate_pitch(colour = "black",
+                       fill   = "white",
+                       limits = FALSE) +
+    geom_point(data = xg_data,
+               aes(x= x2, y = y2, color = is_goal),
+               size = 0.8) +
+   scale_color_manual(values = c("1" = "forestgreen", "0" = "gray"),
+                      name = "",
+                      labels = c("1" = "Goal", "0" = "No Goal")) +
+        theme_pitch() +
+        theme(plot.background = element_rect(fill = "white"),
+              title = element_text(colour = "black"))  + 
+        coord_cartesian(xlim = c(50, 105)) + 
+  theme(legend.position = "bottom", legend.direction = "horizontal",
+              plot.title = element_text(hjust = 0.07, face = "plain"),
+              plot.subtitle = element_text(hjust = 0.07, size = 10, face = "italic"),
+              plot.caption = element_text(hjust = 0.95),
+              plot.margin = margin(1, 0.2, 0.5, 0.2, "cm")) + 
+  labs(title = "Total open shots for the 2017-18 season")
+        
+      
+```
+
+```{r}
+ ggplot(data = xg_data, aes(x = distance_to_goal_line, 
+                            y = ..density..)) + 
+  geom_histogram() + 
+  theme_bw() + 
+
+  labs(title = "Histrogram of Distance to Goal for every shot",
+       y = "Proportion",
+       x = "Distance to goal (m)")
+
+
+```
+
+
+
+```{r}
+
+  ggplot(data = xg_data, aes(x = distance_to_goal_line, 
+                            y = ..density..,
+                             fill = is_goal)) + 
+  geom_histogram() + 
+  theme_bw() + 
+  scale_fill_manual(values = c("1" = "forestgreen", "0" = "gray"),
+                      name = "",
+                      labels = c("1" = "Goal", "0" = "No Goal")) + 
+  labs(title = "Histrogram of Distance to Goal for every shot \nseparated by goal variable",
+       y = "Proportion",
+       x = "Distance to goal (m)")
+
+```
+
+It looks like both the histogram for goals and non-goals have a mode at something like 10 meters. This is explained by the fact that most shots are taken from that distance, whether or not they turned into a goal. We must also notice that on the left part of the plot both histograms are similar, indicating that the closer a shot is taken to the goal, it is more likely for it to be converted. On the right side of the plot we can observe the opposite: the further the shot is taken, the more difficult it is to become a goal. 
+
+
+```{r}
+xg_data %>% 
+  dplyr::select(distance_to_goal_line, 
+         angle_to_goal, eventSec2) %>% 
+  gather(key = "VARIABLE", value = "VALUE") %>% 
+  mutate(VARIABLE = factor(VARIABLE, 
+                           levels = c("angle_to_goal", "distance_to_goal_line", 
+                                      "eventSec2"),
+                           labels = c("Angle to\ngoal", "Distance to\ngoal", "Time of event (seconds)"))) %>%
+  ggplot(aes(x = VARIABLE, y = VALUE)) + 
+  geom_boxplot() + 
+  facet_wrap(~VARIABLE, 
+             scales = "free") + 
+  labs(x = "",
+       y = "")
+
+```
+
+
+# Logistic Regression
+
+We will begin by doing a Logistic Regression with LASSO penalization. First of all, we have to train the model in order to select the parameter $\lambda$. We will do so wiTh 10-fold CV.
+```{r}
+
+set.seed(1212)
+
+train <- train %>% 
+  filter(! subEventName %in% c("Head pass", "Hand pass", "Launch"))
+
+y <- train$is_goal
+
+x <- model.matrix(is_goal~. , train, 
+                  na.action = "na.pass")[,-1]
+
+
+## 10 fold CV for choosing the lambda 
+cv.log_lasso <- cv.glmnet(x, y, family = "binomial", 
+                          alpha = 1, nfolds = 10)
+
+lambda_lse <- cv.log_lasso$lambda.1se
+
+```
+
+```{r}
+plot(cv.log_lasso)
+```
+
+We have that $\log(\lambda)$ = `r round(log(lambda_lse),4)` which means that $\lambda $ = `r round(lambda_lse, 4)`.
+
+We will train our model with such a value for the penalization parameter and see its performance in the test sample. 
+
+
+```{r}
+
+# training
+model_lse <- glmnet(x, y, family = "binomial", alpha = 1, 
+                 lambda = lambda_lse)
+
+```
+
+The summary for the model using $\lambda$ are:
+
+```{r}
+coef(model_lse)
+coef_lse <- coef(model_lse)
+```
+
+We must  notice that the distance to goal has a negative coefficient, which indicates that if the distance to goal increases in 1 meter, then the log-odds to score decrease in  approximately -0.18 units (when all other variables are fixed); in turn, this means that the odds to score decrease. It is important to notice that one of the smallest coefficients in the model tells us that if the preceding pass is classified as a key pass, then the probability to score decreases. This is rather weird because Wyscout defines key pass as "a pass that immediately creates a clear goal scoring opportunity for a teammate". 
+
+
+Let's explore our model calibration using the validation data set. 
+
+```{r}
+
+validation <- validation %>% 
+  filter(! subEventName %in% c("Head pass", "Hand pass", "Launch"))
+
+x_val <- model.matrix(is_goal~. , validation, 
+                  na.action = "na.pass")[,-1]
+
+y_val <- validation$is_goal
+y_pred <- predict(model_lse, 
+                 newx = x_val, type = "response")
+
+# We will make bins of around of 1% for predictons 
+# until p=0.3 and then of 20% afterwards
+calibration.lr <- data.frame(
+  y_val, # is_goal
+  y_pred,
+  bin=cut(y_pred,
+          c(seq(0, 1, by = 0.1)),
+          include.lowest=TRUE)) %>% 
+  group_by(bin) %>% 
+  summarize(
+    n = n(), 
+    mean_observed = mean(y_val)
+  ) %>% 
+  ungroup() %>% 
+  mutate(
+    upper_bound = seq(0.1, 0.9, by = 0.1)
+  )
+
+
+
+calibration.lr %>% 
+  ggplot(aes(x = mean_observed, y = bin)) + 
+  geom_point(aes(size = n)) + 
+  geom_line(data = calibration.lr, 
+            aes(x = upper_bound, y = bin, group = 1), color = "red") + 
+  theme_bw() + 
+  labs(main = "Calibration scatterplot for the logistic regression xG model",
+        y = "Prediction bin",
+        x = "Observed relative frequencies of goals")
+
+
+```
+
+We can see that our model is not that off from the identity line. It is clear that from observed means of 0.5 and to the right we are underpredicting (our model is too conservative). 
+
+```{r}
+
+# Plots for helping us decide the cutoff
+c <- seq(0, 1, by = 0.01)
+
+results_c <- data.frame(
+  Misclassfication = numeric(length(c)),
+  Sensitivity = numeric(length(c)),
+  Specificity = numeric(length(c)),
+  Precision = numeric(length(c)),
+  AUC = numeric(length(c))
+)
+
+for(i in 1:length(c)){
+
+    ci <- c[i]
+    y_labels <- if_else(y_pred > ci, 1, 0)
+    
+    tp <- sum(y_val == 1 & y_labels == 1)
+    tn <- sum(y_val == 0 & y_labels == 0)
+    fp <- sum(y_val == 0 & y_labels == 1)
+    fn <- sum(y_val == 1 & y_labels == 0)
+    
+    nrow(validation) - tp - tn - fp - fn
+    
+    #misclassification 
+    
+    results_c[i, "Misclassfication"] <- mean(y_labels != y_val)
+    
+    # sensitivity (tp/(tp + fn))
+    
+    results_c[i, "Sensitivity"] <- tp/(tp + fn)
+    results_c[i, "Specificity"] <- tn/(tn + fp)
+    results_c[i, "Precision"] <- tp/(tp + fp)
+    
+    
+    pred_val <- prediction(y_labels, y_val)
+    auc_val <- performance(pred_val, measure = "auc")
+    auc_val <- round(auc_val@y.values[[1]], 4)
+    
+    
+    results_c[i, "AUC"] <- auc_val
+    
+
+}
+
+results_c <- results_c %>% 
+  mutate(Threshold = c) 
+
+results_c%>% 
+  gather(-Threshold, key = "Rate", value = "Value") %>% 
+  ggplot(aes(x = Threshold, y = Value, color = Rate)) + 
+  geom_line() + 
+  theme_bw()
+  
+
+# We choose the threshold that mimize misclassification and maximize AUC
+
+t.min.M <- c[which.min(results_c$Misclassfication)]
+t.max.P <- c[which.max(results_c$Precision)]
+
+
+```
+
+
+
+Now, let's test both this logistic regression models on the test sample!
+
+```{r}
+
+test <- test %>% 
+  filter(! subEventName %in% c("Head pass", "Hand pass", "Launch"))
+
+y_test <- test$is_goal
+x_test <- model.matrix(is_goal~. , test, 
+                  na.action = "na.pass")[,-1]
+
+
+# First threshold 
+
+y_lse <- predict(model_lse, newx = x_test, type = "response")
+# Now we must make predictions based on the probabilites 
+
+
+# First threshold
+y_labs.min.m <- if_else(y_lse > t.min.M, 1, 0)
+# Misclassification  rate
+mean(y_labs.min.m != y_test)
+pred_lse <- prediction(y_labs.min.m, y_test)
+auc_lse <- performance(pred_lse, measure = "auc")
+auc_lse <- round(auc_lse@y.values[[1]], 4)
+perf_lse <- performance(pred_lse, measure = "tpr", x.measure = "fpr")
+plot(perf_lse,colorize=FALSE, col="black", 
+     main = "ROC curve for LASSO penalized logistic regression for xG\n
+     using 10-fold CV")
+lines(c(0,1),c(0,1),col = "gray", lty = 4 )
+
+
+# SECOND threshold
+y_labs.max.p <- if_else(y_lse > t.max.P, 1, 0)
+# Misclassification  rate
+mean(y_labs.max.p != y_test)
+pred_lse <- prediction(y_labs.max.p, y_test)
+auc_lse <- performance(pred_lse, measure = "auc")
+auc_lse <- round(auc_lse@y.values[[1]], 4)
+perf_lse <- performance(pred_lse, measure = "tpr", x.measure = "fpr")
+plot(perf_lse,colorize=FALSE, col="black", 
+     main = "ROC curve for LASSO penalized logistic regression for xG\n
+     using 10-fold CV")
+lines(c(0,1),c(0,1),col = "gray", lty = 4 )
+
+
+```
+
+
+
+
+
+What happens if we train the model only with the geographical variables? We won't use the LASSO penalized selection since we only want to see what happens with two variables
+
+```{r, eval = F}
+y_simple <- train$is_goal
+x_simple <- model.matrix(is_goal~. , train %>% 
+                           dplyr::select(x_meter, y_meter, is_goal), 
+                  na.action = "na.pass")[,-1]
+
+
+model_simple <- glmnet(x_simple, y_simple, family = "binomial",
+                       alpha = 1, lambda = 0)
+
+coef(model_simple)
+
+x_grid <- seq(50, 100, by = 0.5)
+y_grid <- seq(0, 100, by = 0.5)
+
+field <- model.matrix( Var3~. ,expand.grid(x_grid, y_grid, 1))[,-1]
+
+preds_simple <- predict(model_simple, newx = field, type = "response")
+
+```
+
+
+```{r, eval = F}
+
+df_simple <- cbind(field, preds_simple) %>% data.frame()
+
+colnames(df_simple) <- c("x", "y", "preds")
+
+ggplot(df_simple) + 
+    annotate_pitch(colour = "black",
+                       fill   = "white",
+                       limits = FALSE) +
+    geom_tile(data = df_simple, 
+               aes(x= x, y = y, fill = preds),
+               size = 0.8) +
+  scale_fill_gradient(low="white", high="blue") +
+        theme_pitch() +
+        theme(plot.background = element_rect(fill = "white"),
+              title = element_text(colour = "black"))  + 
+        coord_cartesian(xlim = c(50, 105)) + 
+  theme(legend.position = "bottom", legend.direction = "horizontal",
+              plot.title = element_text(hjust = 0.07, face = "plain"),
+              plot.subtitle = element_text(hjust = 0.07, size = 10, face = "italic"),
+              plot.caption = element_text(hjust = 0.95),
+              plot.margin = margin(1, 0.2, 0.5, 0.2, "cm")) + 
+  labs(title = "Simple logistic regression predictions")
+
+```
+
+
+This map does not make sense at all. It is telling us that the probability of scoring depend only on the x axis, and not on the y axis. From empirical knowledge, it is nonsense to think that a shot coming from the corner of the field has more probability of becoming a goal than a shot coming from outside the area. 
+
+
+```{r, eval = F}
+
+y_simple <- train$is_goal
+x_simple <- model.matrix(is_goal~. , train %>% 
+                           dplyr::select(distance_to_goal_line,is_goal), 
+                  na.action = "na.pass")
+
+
+model_simple <- glmnet(x_simple, y_simple, family = "binomial",
+                       alpha = 1 , lambda = 0)
+
+coef(model_simple)
+
+x_grid <- seq(50, 100, by = 0.5)
+y_grid <- seq(0, 100, by = 0.5)
+
+field <- expand.grid(x_grid, y_grid) %>% 
+  rename(x = Var1, 
+         y = Var2) %>% 
+  mutate( x_meter = x * 105/100,
+           y_meter = y * 68/100,
+           distance_to_goal_line = sqrt((105 - x_meter)^2 + (32.5 - y_meter)^2)) %>% 
+  dplyr::select(x, y, distance_to_goal_line)
+
+field2 <- model.matrix( Var3~. ,data.frame(cbind(field$distance_to_goal_line, Var3 = 1)))
+
+preds_simple <- predict(model_simple, newx = field2, type = "response")
+
+
+field <- cbind(field, preds_simple) %>% data.frame()
+
+colnames(field)[4] <- "preds"
+
+ggplot(field) + 
+    annotate_pitch(colour = "black",
+                       fill   = "white",
+                       limits = FALSE) +
+    geom_tile(data = field, 
+               aes(x= x, y = y, fill = preds),
+               size = 0.8) +
+  scale_fill_gradient(low="white", high="blue",
+                      name = "xG") +
+        theme_pitch() +
+        theme(plot.background = element_rect(fill = "white"),
+              title = element_text(colour = "black"))  + 
+        coord_cartesian(xlim = c(50, 105)) + 
+  theme(legend.position = "bottom", legend.direction = "horizontal",
+              plot.title = element_text(hjust = 0.07, face = "plain"),
+              plot.subtitle = element_text(hjust = 0.07, size = 10, face = "italic"),
+              plot.caption = element_text(hjust = 0.95),
+              plot.margin = margin(1, 0.2, 0.5, 0.2, "cm")) + 
+  labs(title = "Simple logistic regression predictions")
+
+```
+
+If we make the regression according to distance, the plot makes much more sense!
+
+
+```{r, eval=F}
+field.lr <- expand.grid(
+  x_meter = seq(50, 100, 1)*105/100,
+  y_meter = seq(0, 100, 1)*68/100,
+  subEventName = unique(test$passes_is_key_Pass),
+  passes_is_key_Pass = unique(test$passes_is_key_Pass),
+  passes_distance = 10, 
+  skilled_foot = unique(test$skilled_foot),
+  passes_skilled_foot = unique(test$passes_skilled_foot),
+  passes_is_through = unique(test$passes_is_through),
+  is_CA = unique(test$is_CA),
+  passes_is_CA = unique(test$passes_is_CA),
+  league = unique(test$league),
+  matchPeriod = unique(test$matchPeriod),
+  eventSec2 = 4177
+) %>% mutate(
+  distance_to_goal_line = sqrt((105 - x_meter)^2 + (32.5 - y_meter)^2),
+  angle_to_goal = atan( (7.32 * (105 - x_meter) ) / ( (105 - x_meter)^2 + (32.5 - y_meter)^2 - (7.32/2)^2 )) * 180/pi)
+
+field.lr$is_goal <- 1
+
+field.lr<- field.lr %>% mutate(is_goal = as.factor(is_goal))
+
+field.lr.mm <- model.matrix(is_goal~., data = field.lr)
+
+
+field_pred <- predict(model_lse, newx = field.lr.mm, type = "response")
+
+
+```
+
+
+# Boosting
+
+We know that for boosting we have three tuning parameters:
+
+* $d$, the number of splits (depth parameter)
+* $\lambda$ the shrinkage rate 
+* $B$, the number of trees
+
+We will perform 10-fold CV to dplyr::select them, but first, we will perform backward step wise regression 
+in order to dplyr::select the variables that we are going to use (choosing the model by AIC). 
+
+```{r}
+apply(train, 2, function(x)sum(is.na(x)))
+
+
+
+full.model <- glm(is_goal ~., data = train, family = "binomial")
+step.model <- full.model %>% stepAIC(trace = FALSE)
+coefs <- coef(step.model)
+round(coefs, 4)
+
+
+```
+
+We can see that the variables selected for the model are: matchPeriod, is_CA, x_meter, y_meter, distance_to_goal_line, passes_is_key_Pass, passes_is_through, passes_is_accurate, passes_skilled_foot and skilled_foot2. All of these variables make sense when thinking of elements that increase the probability of a shot ending in a goal. 
+
+
+We now perform the 10-fold CV for selecting the parameters in the model 
+```{r, warning=F, message = F}
+
+train.gbm <- train %>% 
+  dplyr::select(matchPeriod, is_CA, eventSec2, x_meter, y_meter, skilled_foot, distance_to_goal_line, passes_is_key_Pass, subEventName,
+          passes_is_through, is_goal)
+
+plot(train.gbm)
+
+```
+
+
+```{r, eval = F}
+lambda <- c(0.01)
+B <- c(1, seq(100, 1000, by = 100))
+depth <- seq(1, 5, by = 1)
+
+
+# We get the ID's for the 10-CV
+
+K <- c(rep(seq(1, 10), 2161), seq(1, 4))
+K <- sample(K)
+train.gbm$K <- K
+
+CV.boost.results <- NULL
+
+train.gbm <- train.gbm %>% 
+  mutate(matchPeriod = as.factor(matchPeriod),
+         is_CA = as.factor(is_CA),
+         passes_is_key_Pass = as.factor(passes_is_key_Pass),
+         subEventName = as.factor(subEventName),
+         skilled_foot = as.factor(skilled_foot),
+         passes_is_through = as.factor(passes_is_through))
+
+for(l in lambda){
+  for(b in B){
+    for(d in depth){
+      
+      cv.misclasification <- NULL
+      
+      for(k in 1:10){
+  
+          df.train <- train.gbm %>% filter(K != k) %>% dplyr::select(-K)
+          df.test <- train.gbm %>% filter(K == k ) %>% dplyr::select(-K)
+          
+          boost.xg <- gbm(is_goal~. , 
+                         data = df.train,
+                        distribution = "bernoulli", 
+                         n.trees = b, 
+                         interaction.depth = d,
+                         shrinkage = l)
+          
+          # predictions
+          
+          boost.pred <- predict(boost.xg, newdata = df.test, 
+                                type = "response")
+          boost.pred <- if_else(boost.pred > 0.5, 1, 0)
+          
+          cv.misclasification[k] <- mean(boost.pred != df.test$is_goal)
+          
+          print(paste0("lambda: ", l, ", depth: ", d, " trees: ", b))
+        
+        }
+        
+        results <- data.frame(
+          lambda = l, 
+          n_trees = b, 
+          depth = d, 
+          misclassification = mean(cv.misclasification)
+        )
+        
+        CV.boost.results <- rbind(CV.boost.results, results)
+    }
+  }
+}
+
+CV.boost.results <- CV.boost.results %>% 
+  arrange(misclassification)
+
+
+```
+
+```{r}
+
+# 
+# CV.boost.results <- read_csv("cv_boost_results.csv")
+# 
+# CV.boost.results %>% 
+#   mutate(depth = as.factor(depth)) %>% 
+#   ggplot(aes(x = n_trees, y = misclassification, color = depth)) + 
+#   geom_line() + theme_bw() + 
+#   labs(x = "Number of Trees (B)", y = "Misclassification rate", 
+#        title = "10-CV error for different boosting models for xG estimation")
+
+fitControl <- trainControl(## 10-fold CV
+  method = "cv",
+  number = 10)
+
+model.gbm <- train(as.factor(is_goal) ~ ., data = train, 
+                 method = "gbm", 
+                 trControl = fitControl,
+                 ## This last option is actually one
+                 ## for gbm() that passes through
+                 verbose = FALSE)
+
+print(model.gbm)
+ggplot(model.gbm) + theme_bw()
+
+```
+
+We will use those parameters indicated by the model. 
+
+
+Now that we defined our model, we must check its calibration on the validation set. 
+
+```{r}
+
+validation <- validation %>% 
+  filter(! subEventName %in% c("Head pass", "Hand pass", "Launch"))
+
+y_val <- validation$is_goal
+y_pred <- predict(model.gbm, 
+                 newdata = validation, type = "prob")[,2]
+
+# We will make bins of around of 1% for predictons 
+# until p=0.3 and then of 20% afterwards
+calibration.gbm <- data.frame(
+  y_val, # is_goal
+  y_pred,
+  bin=cut(y_pred,
+          c(seq(0, 1, by = 0.1)),
+          include.lowest=TRUE)) %>% 
+  group_by(bin) %>% 
+  summarize(
+    n = n(), 
+    mean_observed = mean(y_val)
+  ) %>% 
+  ungroup() %>% 
+  mutate(
+    upper_bound = seq(0.1, 1, by = 0.1)
+  )
+
+
+
+calibration.gbm %>% 
+  ggplot(aes(x = mean_observed, y = bin)) + 
+  geom_point(aes(size = n)) + 
+  geom_line(data = calibration.gbm, 
+            aes(x = upper_bound, y = bin, group = 1), color = "red") + 
+  theme_bw() + 
+  labs(main = "Calibration scatterplot for the boosting xG model",
+        y = "Prediction bin",
+        x = "Observed relative frequencies of goals")
+
+
+```
+On the calibration plot we see that although the observed average of goals per bin does not quite hit the identity line, our predictions are not that bad in terms of calibration! Some bin averages are a little bit off when their predictions 0.55-0.65, but the model still seems to be fine. 
+
+```{r}
+y_pred_labs <- predict(model.gbm, 
+                 newdata = validation)
+
+table(y_val, y_pred_labs)
+
+# TPR
+tpr <- sensitivity(as.factor(y_pred_labs), as.factor(y_val), negative = "0",
+            positive = "1")
+# TNR
+tnr <- specificity(as.factor(y_pred_labs), as.factor(y_val), negative = "0",
+            positive = "1")
+
+# Positive predictive value
+PPV <- posPredValue(as.factor(y_pred_labs), as.factor(y_val), negative = "0",
+            positive = "1")
+
+misclassification.gbm <- mean(y_pred_labs != y_val) %>% round(4)
+
+```
+Our True Positive Rate is `r tpr`, the True Negative Rate is `r tnr` and the Positive Predictive Value is `r PPV`.As we can see, our model seems to not be too sensitive (cannot predict goals well enough given that the shots really ended in goals), super specifically (can determine what is not goal from all the shots that were not goals) and with average to good precision (from all the shots predicted as goals, most of them are really goals). We might want a model that is more precise and sensible, because we are really interested in predicted a more or less rare outcome by sacrificing the specificity. The current misclassification rate on the validation set is `r misclassification.gbm`.
+
+
+```{r}
+th <- seq(0, 1, by = 0.01)
+sens_vector <- numeric(length(th))
+spec_vector <- numeric(length(th))
+prec_vector <- numeric(length(th))
+mc <- numeric(length(th))
+auc_vec <- numeric(length(th))
+
+for(t in 1:length(th)){
+  
+  c <- th[t]
+  y_pred_labs <- if_else(y_pred > c, 1, 0)
+
+  # TPR
+  sens_vector[t] <- sensitivity(as.factor(y_pred_labs), as.factor(y_val), negative = "0",
+                positive = "1")
+  # TNR
+   spec_vector[t] <- specificity(as.factor(y_pred_labs), as.factor(y_val), negative = "0",
+                positive = "1")
+    
+  # Pospredictive value
+  prec_vector[t] <-posPredValue(as.factor(y_pred_labs), as.factor(y_val), negative = "0",
+                positive = "1")
+  
+  mc[t] <- mean(y_pred_labs != y_val) %>% round(4)
+  
+  
+  pred_val <- prediction(y_pred_labs, y_val)
+  auc_val <- performance(pred_val, measure = "auc")
+  auc_val <- round(auc_val@y.values[[1]], 4)
+
+  auc_vec[t] <- auc_val
+  
+}
+
+
+results_c.boosting <- data.frame(
+  threshold = th,
+  specificity = spec_vector, 
+  sensitivity = sens_vector,
+  precision = prec_vector,
+  AUC = auc_vec,
+  misclassification = mc
+) 
+
+results_c.boosting %>% 
+  gather(-threshold, key = "Metric", value = "value") %>% 
+  ggplot(aes(x = threshold, y = value, color = Metric)) + 
+  geom_line() + 
+  theme_bw() 
+
+```
+From the plot above we can see how our TPR, TNR and PPV change given the cutoff we determine for classifying some shot as a goal given its predicted probability. The gray line indicates our current value for precision. 
+
+
+Let's see what our model shows us when applied to the test data. 
+```{r}
+# Thresholds
+t.min.M2 <- th[which.min(results_c.boosting$misclassification)]
+t.max.P2 <- th[which.max(results_c.boosting$precision)]
+
+preds.gbm <- predict(model.gbm, 
+                 newdata = test, type = "prob")[,2]
+
+
+# First threshold
+preds.gbm.labs1 <- if_else(preds.gbm > t.max.P2, 1, 0)
+mean(preds.gbm.labs1 != test$is_goal) %>% round(4)
+pred_gbm<- prediction(preds.gbm.labs1, test$is_goal)
+auc_gbm <- performance(pred_gbm, measure = "auc")
+auc_gbm <- round(auc_gbm@y.values[[1]], 4)
+perf_gbm <- performance(pred_gbm, measure = "tpr", x.measure = "fpr")
+plot(perf_gbm,colorize=FALSE, col="black", 
+     main = "ROC curve for Boosting")
+lines(c(0,1),c(0,1),col = "gray", lty = 4 )
+
+
+# First threshold
+preds.gbm.labs2 <- if_else(preds.gbm > t.min.M2, 1, 0)
+mean(preds.gbm.labs2 != test$is_goal) %>% round(4)
+pred_gbm<- prediction(preds.gbm.labs2, test$is_goal)
+auc_gbm <- performance(pred_gbm, measure = "auc")
+auc_gbm <- round(auc_gbm@y.values[[1]], 4)
+perf_gbm <- performance(pred_gbm, measure = "tpr", x.measure = "fpr")
+plot(perf_gbm,colorize=FALSE, col="black", 
+     main = "ROC curve for Boosting")
+lines(c(0,1),c(0,1),col = "gray", lty = 4 )
+
+
+```
+
+We previously saw that three of the most important features in the model where the distance to goal, if the previous pass was key and the type of pass. Let's create a grid with distinct values of this variables over the field and see what the predictions look like. We will assume a common soccer scenario for a shot: pass distance is of 10 meters, that the player used his skilled foot, that the pass was not through and not key, not counter-attack, playing in the German league and on the second half. 
+
+```{r}
+field.gbm <- expand.grid(
+  x_meter = seq(50, 100, 1)*105/100,
+  y_meter = seq(0, 100, 1)*68/100,
+  subEventName = as.factor(c("Simple pass")),
+  passes_is_key_Pass = "0",
+  passes_distance = c(10), 
+  skilled_foot = "Yes",
+  passes_skilled_foot = "Yes",
+  passes_is_through = as.factor(c(0)),
+  is_CA = 0,
+  passes_is_CA = as.factor(c(0)),
+  league = "GE",
+  matchPeriod = "2H",
+  eventSec2 = 4177
+) %>% mutate(
+  distance_to_goal_line = sqrt((105 - x_meter)^2 + (32.5 - y_meter)^2),
+  angle_to_goal = atan( (7.32 * (105 - x_meter) ) / ( (105 - x_meter)^2 + (32.5 - y_meter)^2 - (7.32/2)^2 )) * 180/pi)
+
+
+preds.field.gbm <- predict(model.gbm, newdata = field.gbm, type = "prob")[,2]
+
+field.gbm <- field.gbm %>% 
+  cbind(preds = preds.field.gbm) %>% 
+  mutate(subEventName = as.factor(subEventName),
+         passes_is_key_Pass = as.factor(passes_is_key_Pass))
+
+
+base <- field.gbm %>% 
+ggplot() + 
+    geom_tile(data = field.gbm, 
+               aes(x= x_meter*100/105, y = y_meter*100/68, fill = preds),
+               size = 0.8) +
+      annotate_pitch(colour = "black",
+                       fill   = NA,
+                       limits = FALSE) +
+  scale_fill_gradient(low="white", high="red",
+                      name = "xG") +
+        theme_pitch() +
+        theme(plot.background = element_rect(fill = "white"),
+              title = element_text(colour = "black"))  + 
+        coord_cartesian(xlim = c(50, 105)) + 
+  theme(legend.position = "bottom", legend.direction = "horizontal",
+              plot.title = element_text(hjust = 0.07, face = "plain"),
+              plot.subtitle = element_text(hjust = 0.07, size = 10, face = "italic"),
+              plot.caption = element_text(hjust = 0.95),
+              plot.margin = margin(1, 0.2, 0.5, 0.2, "cm")) 
+
+
+base + facet_grid(~subEventName)
+
+```
+As we can see from the plots, our xG model is quite logical, except perhaps for the patches in the bands. It shows us that both for crosses and simple passes of 10 meters, the probability of scoring a goal is centered in the small area and diminishes as the player shoots from farther away. 
+
+
+
+
